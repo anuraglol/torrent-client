@@ -1,74 +1,13 @@
 package main
 
 import (
-	"crypto/sha1"
-	"encoding/json"
+	"crypto/rand"
 	"fmt"
 	"log"
 	"os"
 
 	"github.com/jackpal/bencode-go"
 )
-
-type bencodeInfo struct {
-	Pieces      string `bencode:"pieces"`
-	PieceLength int    `bencode:"piece length"`
-	Length      int    `bencode:"length"`
-	Name        string `bencode:"name"`
-}
-
-type bencodeTorrent struct {
-	Announce string      `bencode:"announce"`
-	Info     bencodeInfo `bencode:"info"`
-}
-
-type TorrentFile struct {
-	Announce    string
-	InfoHash    [20]byte
-	PieceHashes [][20]byte
-	PieceLength int
-	Length      int
-	Name        string
-}
-
-func calculateSHA1(data interface{}) ([]byte, error) {
-	bytes, err := json.Marshal(data)
-	if err != nil {
-		return nil, err
-	}
-
-	h := sha1.New()
-	h.Write(bytes)
-	return h.Sum(nil), nil
-}
-
-func (bto bencodeTorrent) toTorrentFile() (TorrentFile, error) {
-	tf := TorrentFile{}
-	tf.Announce, tf.Name, tf.Length, tf.PieceLength = bto.Announce, bto.Info.Name, bto.Info.Length, bto.Info.PieceLength
-
-	infoHash, err := calculateSHA1(bto.Info)
-	if err == nil {
-		tf.InfoHash = [20]byte(infoHash)
-	}
-
-	data := []byte(bto.Info.Pieces)
-	var pieceHases [][20]byte
-
-	for i := 0; i < len(data); i += 20 {
-		end := i + 20
-		if end > len(data) {
-			end = len(data)
-		}
-
-		var chunk [20]byte
-		copy(chunk[:], data[i:end])
-		pieceHases = append(pieceHases, chunk)
-	}
-
-	tf.PieceHashes = pieceHases
-
-	return tf, nil
-}
 
 func main() {
 	if len(os.Args) < 3 {
@@ -91,7 +30,7 @@ func main() {
 		log.Fatalf("oops, error captured: %v", er.Error())
 		return
 	} else {
-		fmt.Printf("%v", &bto.Announce)
+		fmt.Printf("announce: %v\n", &bto.Announce)
 	}
 
 	tf, err := bto.toTorrentFile()
@@ -99,6 +38,32 @@ func main() {
 		log.Fatalf("oops, error captured: %v", er.Error())
 		return
 	} else {
-		fmt.Printf("file name: %v", tf.Name)
+		fmt.Printf("file name: %v\n", tf.Name)
 	}
+
+	token := make([]byte, 20)
+	rand.Read(token)
+	resp, e := tf.requestTracker([20]byte(token), 6881)
+	if e != nil {
+		log.Fatalf("oops, error captured: %v", e.Error())
+		return
+	}
+	defer resp.Body.Close()
+
+	interval, peers, err := parseTrackerResponse(resp.Body)
+	if err != nil {
+		log.Fatalf("failed to parse tracker response: %v", err)
+	}
+
+	fmt.Printf("Interval: %d seconds\n", interval)
+	fmt.Printf("Found %d peers:\n", len(peers))
+	for _, peer := range peers {
+		fmt.Printf(" - %s:%d\n", peer.IP.String(), peer.Port)
+	}
+
+	conn, err := peers[4].ConnectAndHandshake(tf.InfoHash, [20]byte(token))
+	if err != nil {
+		log.Fatalf("oops, error: %v", err)
+	}
+	fmt.Printf("mhm: %v", conn.RemoteAddr().String())
 }
