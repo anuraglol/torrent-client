@@ -7,7 +7,6 @@ import (
 	"time"
 )
 
-// A Client is a TCP connection with a peer
 type Client struct {
 	Conn     net.Conn
 	Choked   bool
@@ -57,8 +56,6 @@ func recvBitfield(conn net.Conn) (Bitfield, error) {
 	return msg.Payload, nil
 }
 
-// New connects with a peer, completes a handshake, and receives a handshake
-// returns an err if any of those fail.
 func New(peer Peer, peerID, infoHash [20]byte) (*Client, error) {
 	conn, err := net.DialTimeout("tcp", peer.String(), 3*time.Second)
 	if err != nil {
@@ -87,41 +84,35 @@ func New(peer Peer, peerID, infoHash [20]byte) (*Client, error) {
 	}, nil
 }
 
-// Read reads and consumes a message from the connection
 func (c *Client) Read() (*Message, error) {
 	msg, err := ReadMessage(c.Conn)
 	return msg, err
 }
 
-// SendRequest sends a Request message to the peer
 func (c *Client) SendRequest(index, begin, length int) error {
 	req := FormatRequest(index, begin, length)
 	_, err := c.Conn.Write(req.Serialize())
 	return err
 }
 
-// SendInterested sends an Interested message to the peer
 func (c *Client) SendInterested() error {
 	msg := Message{ID: MsgInterested}
 	_, err := c.Conn.Write(msg.Serialize())
 	return err
 }
 
-// SendNotInterested sends a NotInterested message to the peer
 func (c *Client) SendNotInterested() error {
 	msg := Message{ID: MsgNotInterested}
 	_, err := c.Conn.Write(msg.Serialize())
 	return err
 }
 
-// SendUnchoke sends an Unchoke message to the peer
 func (c *Client) SendUnchoke() error {
 	msg := Message{ID: MsgUnchoke}
 	_, err := c.Conn.Write(msg.Serialize())
 	return err
 }
 
-// SendHave sends a Have message to the peer
 func (c *Client) SendHave(index int) error {
 	msg := FormatHave(index)
 	_, err := c.Conn.Write(msg.Serialize())
