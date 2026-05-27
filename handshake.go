@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"strconv"
 	"time"
 )
 
@@ -15,14 +14,15 @@ type Handshake struct {
 	PeerID   [20]byte
 }
 
-func (h *Handshake) Serialize() []byte {
-	buf := make([]byte, 1+len(h.Pstr)+8+20+20)
-	buf[0] = byte(len(h.Pstr))
+func NewHandshake(infoHash, peerID [20]byte) []byte {
+	pstr := "BitTorrent protocol"
+	buf := make([]byte, len(pstr)+49)
+	buf[0] = byte(len(pstr))
 	curr := 1
-	curr += copy(buf[curr:], h.Pstr)
+	curr += copy(buf[curr:], pstr)
 	curr += copy(buf[curr:], make([]byte, 8))
-	curr += copy(buf[curr:], h.InfoHash[:])
-	curr += copy(buf[curr:], h.PeerID[:])
+	curr += copy(buf[curr:], infoHash[:])
+	curr += copy(buf[curr:], peerID[:])
 	return buf
 }
 
@@ -47,47 +47,36 @@ func ReadHandshake(r io.Reader) (*Handshake, error) {
 	var infoHash [20]byte
 	var peerID [20]byte
 
+	pstr := string(handshakeBuf[0:pstrlen])
 	copy(infoHash[:], handshakeBuf[pstrlen+8:pstrlen+8+20])
 	copy(peerID[:], handshakeBuf[pstrlen+8+20:])
 
 	return &Handshake{
-		Pstr:     string(handshakeBuf[0:pstrlen]),
+		Pstr:     pstr,
 		InfoHash: infoHash,
 		PeerID:   peerID,
 	}, nil
 }
 
-func (p *Peer) ConnectAndHandshake(infoHash [20]byte, peerID [20]byte) (net.Conn, error) {
-	address := net.JoinHostPort(p.IP.String(), strconv.Itoa(int(p.Port)))
-	conn, err := net.DialTimeout("tcp", address, 3*time.Second)
-	if err != nil {
-		return nil, err
-	}
+func (h *Handshake) validate(infoHash [20]byte) bool {
+	return bytes.Equal(h.InfoHash[:], infoHash[:])
+}
 
-	req := Handshake{
-		Pstr:     "BitTorrent protocol",
-		InfoHash: infoHash,
-		PeerID:   peerID,
-	}
+func completeHandshake(conn net.Conn, infohash, peerID [20]byte) (*Handshake, error) {
+	conn.SetDeadline(time.Now().Add(3 * time.Second))
+	defer conn.SetDeadline(time.Time{})
 
-	_, err = conn.Write(req.Serialize())
+	_, err := conn.Write(NewHandshake(infohash, peerID))
 	if err != nil {
-		conn.Close()
 		return nil, err
 	}
 
 	res, err := ReadHandshake(conn)
 	if err != nil {
-		conn.Close()
 		return nil, err
 	}
-
-	if !bytes.Equal(res.InfoHash[:], infoHash[:]) {
-		conn.Close()
-		return nil, fmt.Errorf("info hash mismatch")
+	if !res.validate(infohash) {
+		return nil, fmt.Errorf("expected infohash %x but got %x", infohash, res.InfoHash)
 	}
-
-	// fmt.Printf("successfully connected and handshaked with: %v\n", res.PeerID)
-
-	return conn, nil
+	return res, nil
 }

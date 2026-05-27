@@ -2,78 +2,144 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha1"
 	"fmt"
 	"log"
 	"os"
-	"sync"
+	"path/filepath"
 
 	"github.com/jackpal/bencode-go"
 )
 
+var (
+	workQueue          chan *pieceWork
+	results            chan *pieceResult
+	totalPieces        int
+	maxConcurrentPeers = 5
+)
+
 func main() {
-	if len(os.Args) < 3 {
-		fmt.Println("Usage: <program> <inPath> <outPath>")
+	if len(os.Args) < 2 {
+		fmt.Println("usage: <program> <inpath>")
 		return
 	}
-
 	inPath := os.Args[1]
 
-	file, err := os.Open(inPath)
+	tf, err := openTorrentFile(inPath)
 	if err != nil {
-		fmt.Println("Error opening file:", err)
-		return
+		log.Fatalf("error opening torrent file: %v", err)
+	}
+
+	peers, err := tf.getPeers()
+	if err != nil {
+		log.Fatalf("error getting peers: %v", err)
+	}
+
+	totalPieces = len(tf.PieceHashes)
+	workQueue = make(chan *pieceWork, totalPieces)
+	results = make(chan *pieceResult, totalPieces)
+
+	for i, hash := range tf.PieceHashes {
+		length := tf.PieceLength
+		if i == totalPieces-1 {
+			length = tf.Length % tf.PieceLength
+			if length == 0 {
+				length = tf.PieceLength
+			}
+		}
+		workQueue <- &pieceWork{index: i, hash: hash, length: length}
+	}
+
+	peerChan := make(chan *Peer, maxConcurrentPeers)
+	for range maxConcurrentPeers {
+		go func() {
+			for peer := range peerChan {
+				peer.startWorker(tf, workQueue, results)
+			}
+		}()
+	}
+
+	go func() {
+		for i := range peers {
+			peerChan <- &peers[i]
+		}
+	}()
+
+	buf := make([][]byte, totalPieces)
+	donePieces := 0
+	for donePieces < totalPieces {
+		fmt.Println("doing something with a piece i guess")
+		res := <-results
+		if !verifyPiece(tf, res.index, res.buf) {
+			workQueue <- &pieceWork{index: res.index, hash: tf.PieceHashes[res.index], length: len(res.buf)}
+			continue
+		}
+		buf[res.index] = res.buf
+		donePieces++
+
+		percent := float64(donePieces) / float64(totalPieces) * 100
+		fmt.Printf("\r(%.2f%%) downloaded piece #%d", percent, res.index)
+	}
+	fmt.Println("\ndownload completed")
+	close(workQueue)
+
+	assembleFile(tf.Name, buf)
+}
+
+func openTorrentFile(path string) (*torrentFile, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
 	}
 	defer file.Close()
 
 	bto := bencodeTorrent{}
-	er := bencode.Unmarshal(file, &bto)
-	if er != nil {
-		log.Fatalf("oops, error captured: %v", er.Error())
-		return
-	} else {
-		fmt.Printf("announce: %v\n", &bto.Announce)
-	}
-
-	tf, err := bto.toTorrentFile()
+	err = bencode.Unmarshal(file, &bto)
 	if err != nil {
-		log.Fatalf("oops, error captured: %v", er.Error())
-		return
-	} else {
-		fmt.Printf("file name: %v\n", tf.Name)
+		return nil, err
 	}
+	return bto.toTorrentFile()
+}
 
-	token := make([]byte, 20)
-	rand.Read(token)
-	resp, e := tf.requestTracker([20]byte(token), 6881)
-	if e != nil {
-		log.Fatalf("oops, error captured: %v", e.Error())
-		return
+func (tf *torrentFile) getPeers() ([]Peer, error) {
+	var peerID [20]byte
+	_, err := rand.Read(peerID[:])
+	if err != nil {
+		return nil, err
+	}
+	resp, err := tf.requestTracker(peerID, 6881)
+	if err != nil {
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	interval, peers, err := parseTrackerResponse(resp.Body)
 	if err != nil {
-		log.Fatalf("failed to parse tracker response: %v", err)
+		return nil, err
 	}
+	log.Printf("tracker interval %d", interval)
+	return peers, nil
+}
 
-	fmt.Printf("Interval: %d seconds\n", interval)
-	fmt.Printf("Found %d peers:\n", len(peers))
-
-	var wg sync.WaitGroup
-
-	for _, peer := range peers {
-		wg.Add(1)
-		go func(peer Peer) {
-			defer wg.Done()
-			conn, err := peer.ConnectAndHandshake(tf.InfoHash, [20]byte(token))
-			if err == nil {
-				peer.StartPeerSession(conn)
-			} else {
-			}
-		}(peer)
-
-		fmt.Printf(" - %s:%d\n", peer.IP.String(), peer.Port)
+func assembleFile(name string, buf [][]byte) {
+	_ = os.MkdirAll("output", os.ModePerm)
+	outPath := filepath.Join("output", name)
+	outFile, err := os.Create(outPath)
+	if err != nil {
+		log.Fatalf("failed to create output file: %v", err)
 	}
+	defer outFile.Close()
 
-	wg.Wait()
+	for _, b := range buf {
+		_, err := outFile.Write(b)
+		if err != nil {
+			log.Fatalf("failed to write to output file: %v", err)
+		}
+	}
+	fmt.Printf("file assembled successfully to %s\n", outPath)
+}
+
+func verifyPiece(tf *torrentFile, index int, data []byte) bool {
+	hash := sha1.Sum(data)
+	return string(hash[:]) == string(tf.PieceHashes[index][:])
 }
