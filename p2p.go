@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -15,6 +17,7 @@ var (
 
 func InitProgress(totalPieces int) {
 	Downloaded = make([]bool, totalPieces)
+	_ = os.MkdirAll("output", os.ModePerm)
 }
 
 func (p *Peer) StartPeerSession(conn net.Conn) error {
@@ -54,8 +57,7 @@ func (p *Peer) StartPeerSession(conn net.Conn) error {
 		if msg == nil {
 			continue
 		}
-
-		fmt.Printf("message received: %v\n", msg.ID)
+		fmt.Printf("%v\n", msg.ID)
 
 		switch msg.ID {
 		case MsgChoke:
@@ -73,7 +75,6 @@ func (p *Peer) StartPeerSession(conn net.Conn) error {
 
 		case MsgPiece:
 			timeout = 30 * time.Second
-			fmt.Printf("download progress: %v\n", Downloaded)
 
 			err := p.HandlePieceMessage(msg, conn)
 			if err != nil {
@@ -125,11 +126,23 @@ func (p *Peer) HandlePieceMessage(msg *Message, conn net.Conn) error {
 	}
 
 	index := binary.BigEndian.Uint32(msg.Payload[0:4])
+	begin := binary.BigEndian.Uint32(msg.Payload[4:8])
+
+	buff := msg.Payload[8:]
+	fmt.Printf("processing buffer with length: %v", len(buff))
+
+	filename := filepath.Join("output", fmt.Sprintf("piece_%d_block_%d.bin", index, begin))
+	err := os.WriteFile(filename, buff, 0644)
+	if err != nil {
+		fmt.Printf("Failed to write block file: %v\n", err)
+		return err
+	}
+
+	fmt.Printf("Saved block file: %s (%d bytes)\n", filename, len(buff))
 
 	progressMu.Lock()
 	if int(index) < len(Downloaded) && !Downloaded[index] {
 		Downloaded[index] = true
-		fmt.Printf("Piece %d saved in memory!\n", index)
 	}
 	progressMu.Unlock()
 
