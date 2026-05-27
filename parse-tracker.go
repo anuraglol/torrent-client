@@ -14,8 +14,10 @@ type bencodeTrackerResponse struct {
 }
 
 type Peer struct {
-	IP   net.IP
-	Port uint16
+	IP         net.IP
+	Port       uint16
+	Choked     bool
+	Interested bool
 }
 
 func parseTrackerResponse(r io.Reader) (int, []Peer, error) {

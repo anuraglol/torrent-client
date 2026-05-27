@@ -1,97 +1,30 @@
 package main
 
 import (
-	"bytes"
+	"encoding/binary"
 	"fmt"
-	"io"
 	"net"
-	"strconv"
+	"sync"
 	"time"
 )
 
-type Handshake struct {
-	Pstr     string
-	InfoHash [20]byte
-	PeerID   [20]byte
-}
+var (
+	progressMu sync.Mutex
+	Downloaded []bool
+)
 
-func (h *Handshake) Serialize() []byte {
-	buf := make([]byte, 1+len(h.Pstr)+8+20+20)
-	buf[0] = byte(len(h.Pstr))
-	curr := 1
-	curr += copy(buf[curr:], h.Pstr)
-	curr += copy(buf[curr:], make([]byte, 8))
-	curr += copy(buf[curr:], h.InfoHash[:])
-	curr += copy(buf[curr:], h.PeerID[:])
-	return buf
-}
-
-func ReadHandshake(r io.Reader) (*Handshake, error) {
-	lengthBuf := make([]byte, 1)
-	_, err := io.ReadFull(r, lengthBuf)
-	if err != nil {
-		return nil, err
-	}
-	pstrlen := int(lengthBuf[0])
-
-	if pstrlen == 0 {
-		return nil, fmt.Errorf("pstrlen cannot be 0")
-	}
-
-	handshakeBuf := make([]byte, pstrlen+8+20+20)
-	_, err = io.ReadFull(r, handshakeBuf)
-	if err != nil {
-		return nil, err
-	}
-
-	var infoHash [20]byte
-	var peerID [20]byte
-
-	copy(infoHash[:], handshakeBuf[pstrlen+8:pstrlen+8+20])
-	copy(peerID[:], handshakeBuf[pstrlen+8+20:])
-
-	return &Handshake{
-		Pstr:     string(handshakeBuf[0:pstrlen]),
-		InfoHash: infoHash,
-		PeerID:   peerID,
-	}, nil
-}
-
-func (p *Peer) ConnectAndHandshake(infoHash [20]byte, peerID [20]byte) (net.Conn, error) {
-	address := net.JoinHostPort(p.IP.String(), strconv.Itoa(int(p.Port)))
-	conn, err := net.DialTimeout("tcp", address, 5*time.Second)
-	if err != nil {
-		return nil, err
-	}
-
-	req := Handshake{
-		Pstr:     "BitTorrent protocol",
-		InfoHash: infoHash,
-		PeerID:   peerID,
-	}
-
-	_, err = conn.Write(req.Serialize())
-	if err != nil {
-		conn.Close()
-		return nil, err
-	}
-
-	res, err := ReadHandshake(conn)
-	if err != nil {
-		conn.Close()
-		return nil, err
-	}
-
-	if !bytes.Equal(res.InfoHash[:], infoHash[:]) {
-		conn.Close()
-		return nil, fmt.Errorf("info hash mismatch")
-	}
-
-	return conn, nil
+func InitProgress(totalPieces int) {
+	Downloaded = make([]bool, totalPieces)
 }
 
 func (p *Peer) StartPeerSession(conn net.Conn) error {
 	defer conn.Close()
+
+	p.Choked = true
+	p.Interested = false
+
+	timeout := 15 * time.Second
+	conn.SetReadDeadline(time.Now().Add(timeout))
 
 	msg, err := ReadMessage(conn)
 	if err != nil {
@@ -104,12 +37,15 @@ func (p *Peer) StartPeerSession(conn net.Conn) error {
 	}
 
 	interestedMsg := Message{ID: MsgInterested}
+	conn.SetWriteDeadline(time.Now().Add(timeout))
 	_, err = conn.Write(interestedMsg.Serialize())
 	if err != nil {
 		return err
 	}
+	p.Interested = true
 
 	for {
+		conn.SetReadDeadline(time.Now().Add(timeout))
 		msg, err := ReadMessage(conn)
 		if err != nil {
 			return err
@@ -119,13 +55,91 @@ func (p *Peer) StartPeerSession(conn net.Conn) error {
 			continue
 		}
 
+		fmt.Printf("message received: %v\n", msg.ID)
+
 		switch msg.ID {
-		case MsgUnchoke:
-			// The peer allowed you to request blocks! You can now send MsgRequest.
 		case MsgChoke:
-			// The peer stopped you from requesting blocks.
+			p.Choked = true
+			timeout = 15 * time.Second
+
+		case MsgUnchoke:
+			p.Choked = false
+			timeout = 30 * time.Second
+
+			err := p.DownloadNextBlock(conn)
+			if err != nil {
+				return err
+			}
+
 		case MsgPiece:
-			// The peer delivered a block of data you asked for.
+			timeout = 30 * time.Second
+			fmt.Printf("download progress: %v\n", Downloaded)
+
+			err := p.HandlePieceMessage(msg, conn)
+			if err != nil {
+				return err
+			}
 		}
 	}
+}
+
+func (p *Peer) DownloadNextBlock(conn net.Conn) error {
+	if p.Choked {
+		return nil
+	}
+
+	var targetPiece uint32
+	found := false
+
+	progressMu.Lock()
+	for i, done := range Downloaded {
+		if !done {
+			targetPiece = uint32(i)
+			found = true
+			break
+		}
+	}
+	progressMu.Unlock()
+
+	if !found {
+		return nil
+	}
+
+	index := targetPiece
+	begin := uint32(0)
+	length := uint32(16384)
+
+	reqMsg := Message{
+		ID:      MsgRequest,
+		Payload: FormatRequestPayload(index, begin, length),
+	}
+
+	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	_, err := conn.Write(reqMsg.Serialize())
+	return err
+}
+
+func (p *Peer) HandlePieceMessage(msg *Message, conn net.Conn) error {
+	if len(msg.Payload) < 8 {
+		return nil
+	}
+
+	index := binary.BigEndian.Uint32(msg.Payload[0:4])
+
+	progressMu.Lock()
+	if int(index) < len(Downloaded) && !Downloaded[index] {
+		Downloaded[index] = true
+		fmt.Printf("Piece %d saved in memory!\n", index)
+	}
+	progressMu.Unlock()
+
+	return p.DownloadNextBlock(conn)
+}
+
+func FormatRequestPayload(index, begin, length uint32) []byte {
+	payload := make([]byte, 12)
+	binary.BigEndian.PutUint32(payload[0:4], index)
+	binary.BigEndian.PutUint32(payload[4:8], begin)
+	binary.BigEndian.PutUint32(payload[8:12], length)
+	return payload
 }

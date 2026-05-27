@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sync"
 
 	"github.com/jackpal/bencode-go"
 )
@@ -57,13 +58,22 @@ func main() {
 
 	fmt.Printf("Interval: %d seconds\n", interval)
 	fmt.Printf("Found %d peers:\n", len(peers))
+
+	var wg sync.WaitGroup
+
 	for _, peer := range peers {
+		wg.Add(1)
+		go func(peer Peer) {
+			defer wg.Done()
+			conn, err := peer.ConnectAndHandshake(tf.InfoHash, [20]byte(token))
+			if err == nil {
+				peer.StartPeerSession(conn)
+			} else {
+			}
+		}(peer)
+
 		fmt.Printf(" - %s:%d\n", peer.IP.String(), peer.Port)
 	}
 
-	conn, err := peers[4].ConnectAndHandshake(tf.InfoHash, [20]byte(token))
-	if err != nil {
-		log.Fatalf("oops, error: %v", err)
-	}
-	fmt.Printf("mhm: %v", conn.RemoteAddr().String())
+	wg.Wait()
 }
