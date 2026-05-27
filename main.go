@@ -68,7 +68,6 @@ func main() {
 	buf := make([][]byte, totalPieces)
 	donePieces := 0
 	for donePieces < totalPieces {
-		fmt.Println("doing something with a piece i guess")
 		res := <-results
 		if !verifyPiece(tf, res.index, res.buf) {
 			workQueue <- &pieceWork{index: res.index, hash: tf.PieceHashes[res.index], length: len(res.buf)}
@@ -78,7 +77,7 @@ func main() {
 		donePieces++
 
 		percent := float64(donePieces) / float64(totalPieces) * 100
-		fmt.Printf("\r(%.2f%%) downloaded piece #%d", percent, res.index)
+		fmt.Printf("\r(%.2f%%) downloaded piece #%d\n", percent, res.index)
 	}
 	fmt.Println("\ndownload completed")
 	close(workQueue)

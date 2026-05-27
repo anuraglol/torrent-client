@@ -5,6 +5,19 @@ import (
 	"net"
 )
 
+type Bitfield []byte
+
+func (bf Bitfield) HasPiece(index int) bool {
+	byteIndex := index / 8
+	bitIndex := index % 8
+
+	if byteIndex < 0 || byteIndex >= len(bf) {
+		return false
+	}
+
+	return (bf[byteIndex] >> (7 - uint(bitIndex)) & 1) == 1
+}
+
 type bencodeInfo struct {
 	Pieces      string `bencode:"pieces"`
 	PieceLength int    `bencode:"piece length"`
